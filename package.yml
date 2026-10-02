@@ -1,0 +1,106 @@
+name: vale
+title: Vale
+summary: Checks prose in Markdown, MDX, HTML and code comments against your own style rules with Vale. Styles are not included.
+homepage: https://vale.sh/
+# Vale and the en_US-web dictionary it embeds (MIT), and the Go modules
+# linked into it: MIT, BSD-3-Clause (the Go standard library, golang.org/x,
+# pflag, mergo, uuid), BSD-2-Clause (cascadia) and Apache-2.0 (ini, goutils,
+# yaml.v3). The tree-sitter runtime and grammars compiled in with cgo are
+# MIT, apart from the Elixir grammar (Apache-2.0), and the runtime includes
+# ICU's UTF-8 and UTF-16 macros (Unicode-DFS-2016). The Lua grammar has no
+# license file; its Cargo.toml declares MIT and its package.json ISC.
+license: MIT AND BSD-3-Clause AND BSD-2-Clause AND Apache-2.0 AND Unicode-DFS-2016
+upstream:
+  source: github-release
+  repository: vale-cli/vale
+  # goreleaser drafts each release and the maintainer publishes it by hand;
+  # drafts are not read.
+  tag-pattern: '^v(\d+\.\d+\.\d+)$'
+  version-template: '{1}'
+  versioning: semver
+  version: 3.24.0
+  # The release binaries for Linux are glibc builds, which do not run on
+  # Alpine, so the build compiles the tag.
+  git:
+    url: https://github.com/vale-cli/vale.git
+    tag: v{version}
+    commit: 2ee781716f8c177c2a143e18d535ddb11e264f00
+image:
+  entrypoint: [vale]
+  cmd: [--help]
+test:
+  - |
+    vale --version > version.txt
+    test "$(cat version.txt)" = "vale version $VERSION" \
+      || { echo "expected 'vale version $VERSION', got '$(cat version.txt)'" >&2; exit 1; }
+  - |
+    # A style with one rule, applied to Markdown, MDX and Python files.
+    mkdir -p styles/Test
+    cat > styles/Test/Avoid.yml <<'EOF'
+    extends: existence
+    message: "Avoid '%s'."
+    level: error
+    ignorecase: true
+    tokens:
+      - simply
+    EOF
+    cat > .vale.ini <<'EOF'
+    StylesPath = styles
+    MinAlertLevel = suggestion
+
+    [*.{md,mdx,py}]
+    BasedOnStyles = Test
+    EOF
+    # The word in the code block is not prose and is skipped.
+    cat > guide.md <<'EOF'
+    # Install
+
+    You can simply run the installer.
+
+    ```sh
+    simply --install
+    ```
+    EOF
+    vale --no-exit --output=JSON guide.md > guide.json || { cat guide.json >&2; exit 1; }
+    test "$(grep -c '"Check": "Test.Avoid"' guide.json)" -eq 1 || { cat guide.json >&2; exit 1; }
+    grep -Eq '"Line": 3$' guide.json || { cat guide.json >&2; exit 1; }
+  - |
+    # Comments and docstrings are prose, other strings are not. vale finds
+    # them with the tree-sitter Python grammar, which is C compiled with cgo.
+    cat > example.py <<'EOF'
+    """Install the package."""
+
+    # Call main() or simply run this file.
+    NOTE = "simply a string"
+    EOF
+    vale --no-exit --output=line example.py > py.txt || { cat py.txt >&2; exit 1; }
+    cut -d: -f2,4- py.txt > py.got
+    printf '%s\n' "3:Test.Avoid:Avoid 'simply'." > py.want
+    cmp py.want py.got || { cat py.txt >&2; exit 1; }
+  - |
+    # vale parses MDX itself, without Node.js: the import and the JSX element
+    # are code, the paragraph is prose.
+    cat > page.mdx <<'EOF'
+    import { Callout } from './simply.js'
+
+    <Callout kind="simply" />
+
+    You can simply run the installer.
+    EOF
+    vale --no-exit --output=line page.mdx > mdx.txt || { cat mdx.txt >&2; exit 1; }
+    cut -d: -f2,4- mdx.txt > mdx.got
+    printf '%s\n' "5:Test.Avoid:Avoid 'simply'." > mdx.want
+    cmp mdx.want mdx.got || { cat mdx.txt >&2; exit 1; }
+  - |
+    # An error-level alert makes vale exit with 1, a clean file with 0.
+    if vale guide.md > exit.txt 2>&1; then status=0; else status=$?; fi
+    test "$status" -eq 1 || { cat exit.txt >&2; echo "expected exit status 1, got $status" >&2; exit 1; }
+    printf '%s\n' '# Install' '' 'Run the installer.' > clean.md
+    vale clean.md > clean.txt 2>&1 || { cat clean.txt >&2; exit 1; }
+examples:
+  - title: Check the files in docs/ against the styles named in .vale.ini
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/vale docs/
+  - title: Download the style packages listed in .vale.ini into its StylesPath
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/vale sync
+  - title: Print the alerts as JSON
+    command: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/randomcontainers/vale --output=JSON docs/
