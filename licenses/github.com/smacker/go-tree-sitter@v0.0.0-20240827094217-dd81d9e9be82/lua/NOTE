@@ -1,0 +1,4 @@
+The Lua grammar in this directory is generated from tree-sitter-lua,
+https://github.com/tjdevries/tree-sitter-lua, at commit
+acb3f3666383bd8cba9c9d9dde00ec4b16b055d6. That repository has no license
+file. Its Cargo.toml declares the MIT license, and its package.json ISC.

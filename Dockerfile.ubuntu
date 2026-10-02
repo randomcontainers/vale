@@ -1,0 +1,141 @@
+# syntax=docker/dockerfile:1.27.0@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+# check=error=true
+
+ARG BASE_IMAGE=ubuntu:26.04
+
+FROM ${BASE_IMAGE} AS build
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+# The base image's packages are recorded before anything is installed, so that
+# runtime-deps can leave them out. Every image that installs runtime-deps is
+# built on the same base.
+RUN dpkg-query -W -f '${Package}\n' | LC_ALL=C sort -u > /tmp/base-packages; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      curl \
+      git; \
+    rm -rf /var/lib/apt/lists/*
+
+# Go comes from go.dev instead of the distro, so that both distros build with
+# the same release and get Go's security fixes when Go publishes them. Update
+# the version and both checksums together, from https://go.dev/dl/.
+# GOTOOLCHAIN=local keeps go from downloading another toolchain: a vale release
+# that needs a newer Go fails to build until the pin is raised.
+ARG GO_TOOLCHAIN=go1.26.9
+ARG GO_TOOLCHAIN_AMD64_SHA256=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d
+ARG GO_TOOLCHAIN_ARM64_SHA256=4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+      amd64) sha256="${GO_TOOLCHAIN_AMD64_SHA256}" ;; \
+      arm64) sha256="${GO_TOOLCHAIN_ARM64_SHA256}" ;; \
+      *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o /tmp/go.tar.gz \
+      "https://dl.google.com/go/${GO_TOOLCHAIN}.linux-${TARGETARCH}.tar.gz"; \
+    echo "${sha256}  /tmp/go.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/go.tar.gz -C /usr/local; \
+    rm /tmp/go.tar.gz; \
+    test "$(/usr/local/go/bin/go env GOVERSION)" = "${GO_TOOLCHAIN}"
+ENV PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    GOTOOLCHAIN=local \
+    CGO_ENABLED=1 \
+    CGO_CFLAGS=-O2 \
+    CGO_CXXFLAGS=-O2
+
+# vale publishes prebuilt binaries but no source tarball, so the release tag is
+# cloned and must point to the commit pinned in package.yml.
+ARG VERSION
+ARG SOURCE_COMMIT
+RUN printf '%s\n' "${VERSION}" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' \
+      || { echo "unexpected VERSION: ${VERSION}" >&2; exit 1; }; \
+    printf '%s\n' "${SOURCE_COMMIT}" | grep -Eqx '[0-9a-f]{40}' \
+      || { echo "SOURCE_COMMIT must be a full commit id" >&2; exit 1; }; \
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch "v${VERSION}" \
+      https://github.com/vale-cli/vale.git /src/vale; \
+    test "$(git -C /src/vale rev-parse HEAD)" = "${SOURCE_COMMIT}" \
+      || { echo "tag v${VERSION} is not commit ${SOURCE_COMMIT}" >&2; exit 1; }
+WORKDIR /src/vale
+ARG JOBS
+# The tree-sitter grammars that vale uses to find comments in source code are
+# C and C++, built with cgo. Modules are checked against go.sum, which
+# -mod=readonly keeps as it is, and the checkout stays in place so that the
+# binary records the commit (go version -m shows it).
+RUN mkdir -p /out/usr/local/bin; \
+    go build -mod=readonly -trimpath -buildvcs=true -buildmode=pie -p "${JOBS:-$(nproc)}" \
+      -ldflags "-s -w -X main.version=${VERSION}" -o /out/usr/local/bin/vale ./cmd/vale; \
+    go mod verify; \
+    bin=/out/usr/local/bin/vale; \
+    "$bin" --version > /tmp/vale-version; \
+    grep -Fqx "vale version ${VERSION}" /tmp/vale-version || { cat /tmp/vale-version >&2; exit 1; }; \
+    go version -m "$bin" > /tmp/vale-modules; \
+    awk -F '\t' '$2 == "build" { print $3 }' /tmp/vale-modules > /tmp/vale-build; \
+    for setting in "vcs.revision=${SOURCE_COMMIT}" vcs.modified=false CGO_ENABLED=1 -buildmode=pie; do \
+      grep -Fqx -- "$setting" /tmp/vale-build \
+        || { cat /tmp/vale-modules >&2; echo "missing build setting: $setting" >&2; exit 1; }; \
+    done; \
+    readelf -hW "$bin" > /tmp/vale-elf; \
+    grep -Eq '^ *Type: +DYN ' /tmp/vale-elf || { cat /tmp/vale-elf >&2; exit 1; }
+
+ARG BASE_IMAGE
+# vale's spell checker is derived from gospell, whose license is in
+# internal/spell, and internal/core/markup.go starts with the MIT notice of
+# Write.as. The dictionary embedded from internal/spell/data is en_US-web,
+# whose license is not in vale's repository and is kept in licenses/ instead.
+# go-licenses.sh adds the license files of the Go modules and of the
+# C sources they compile in (see licenses/README.md). runtime-deps lists the
+# packages that own the libraries vale loads, minus the base image's packages,
+# plus the packages in runtime-deps.ubuntu.
+RUN --mount=type=bind,source=scripts/go-licenses.sh,target=/tmp/go-licenses.sh \
+    --mount=type=bind,source=licenses,target=/tmp/licenses \
+    --mount=type=bind,source=runtime-deps.ubuntu,target=/tmp/runtime-deps.extra \
+    meta=/out/usr/local/share/randomcontainers/vale; \
+    mkdir -p "$meta/licenses"; \
+    cp LICENSE "$meta/licenses/LICENSE"; \
+    cp internal/spell/LICENSE "$meta/licenses/LICENSE.gospell"; \
+    test -f internal/spell/data/en_US-web.dic; \
+    cp /tmp/licenses/LICENSE.en_US-web "$meta/licenses/"; \
+    sed -n '1,/^package /p' internal/core/markup.go | sed '$d' | sed 's|^// \{0,1\}||' \
+      > "$meta/licenses/LICENSE.markup"; \
+    grep -q 'Copyright (c) 2016 Write.as' "$meta/licenses/LICENSE.markup"; \
+    grep -q 'Permission is hereby granted' "$meta/licenses/LICENSE.markup"; \
+    sh /tmp/go-licenses.sh /out/usr/local/bin/vale "$meta/licenses" /tmp/licenses; \
+    echo "${VERSION}" > "$meta/version"; \
+    printf '%s\n' \
+      "https://github.com/vale-cli/vale.git@${SOURCE_COMMIT}" \
+      "https://github.com/vale-cli/vale/tree/${SOURCE_COMMIT}" \
+      > "$meta/source"; \
+    { \
+      echo "base: ${BASE_IMAGE}"; \
+      echo "go: $(go env GOVERSION)"; \
+      echo "compiler: $(cc --version | sed -n 1p)"; \
+      echo "commit: ${SOURCE_COMMIT}"; \
+      cat /tmp/vale-version; \
+      sed 1d /tmp/vale-modules; \
+    } > "$meta/buildinfo"; \
+    find /out/usr/local -type f \( -perm -u+x -o -name '*.so*' \) -print0 \
+      | xargs -0 env LD_LIBRARY_PATH=/out/usr/local/lib ldd > /tmp/ldd 2>&1 || true; \
+    if grep 'not found' /tmp/ldd; then exit 1; fi; \
+    awk '$2 == "=>" && $3 ~ /^\// && $3 !~ /^\/out\// { print $3 }' /tmp/ldd | sort -u > /tmp/libs; \
+    test -s /tmp/libs; \
+    while read -r lib; do \
+      real="$(readlink -f "$lib")"; \
+      dpkg-query --search "*${real#/usr}"; \
+    done < /tmp/libs | cut -d: -f1 | LC_ALL=C sort -u | LC_ALL=C comm -23 - /tmp/base-packages > /tmp/elf-deps; \
+    LC_ALL=C sort -u /tmp/elf-deps /tmp/runtime-deps.extra > "$meta/runtime-deps"
+
+FROM ${BASE_IMAGE} AS slim
+ARG DEBIAN_FRONTEND=noninteractive
+RUN --mount=type=bind,from=build,source=/out/usr/local/share/randomcontainers/vale/runtime-deps,target=/tmp/runtime-deps \
+    set -eu; \
+    apt-get update; \
+    xargs apt-get install -y --no-install-recommends ca-certificates tini < /tmp/runtime-deps; \
+    rm -rf /var/lib/apt/lists/*; \
+    install -d -m 1777 /work /cache
+COPY --link --from=build /out/usr/local/ /usr/local/
+ENV LANG=C.UTF-8 XDG_CACHE_HOME=/cache
+WORKDIR /work
+USER 1000:1000
+ENTRYPOINT ["tini", "--", "vale"]
+CMD ["--help"]
