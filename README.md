@@ -165,7 +165,7 @@ Vale is released under the [MIT license](https://github.com/vale-cli/vale/blob/v
 
 The image's license label is `MIT AND BSD-3-Clause AND BSD-2-Clause AND Apache-2.0 AND Unicode-DFS-2016`. The license files are in `/usr/local/share/randomcontainers/vale/licenses/`, with one directory per Go module. The Go modules that bundle tree-sitter do not include the licenses of the runtime and the grammars, and Vale's repository does not include the license of en_US-web, so this repository keeps them in [licenses](licenses) and the build copies them into the image. The Lua grammar's repository has no license file; its Cargo.toml declares MIT and its package.json ISC. Links to the source are in `/usr/local/share/randomcontainers/vale/source`. libstdc++ and the other libraries from Ubuntu or Alpine keep their own licenses. The SBOM lists them.
 
-The files in this repository are available under the MIT license, see [LICENSE](LICENSE).
+The files in this repository are available under the MIT license, see [LICENSE](LICENSE), except the license texts in `licenses/`, which keep their own terms.
 
 ## Requesting a tool
 
