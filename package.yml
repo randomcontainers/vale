@@ -18,13 +18,13 @@ upstream:
   tag-pattern: '^v(\d+\.\d+\.\d+)$'
   version-template: '{1}'
   versioning: semver
-  version: 3.25.1
+  version: 3.26.0
   # The release binaries for Linux are glibc builds, which do not run on
   # Alpine, so the build compiles the tag.
   git:
     url: https://github.com/vale-cli/vale.git
     tag: v{version}
-    commit: d7a379da688e3ec07138ef94e4f0f0889954d617
+    commit: e2d4374b1c66c8a1dd6d912bebc135040d8833fa
 image:
   entrypoint: [vale]
   cmd: [--help]
